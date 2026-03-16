@@ -1,154 +1,412 @@
-import { useEffect, useRef, useState, useMemo, useCallback } from "react";
-import { useNavigate } from "@/lib/router";
+/**
+ * OrgChart — Compact hybrid layout:
+ * Leaf teams: manager on left, members stacked vertically (max 8) to the right.
+ * Branch teams: manager on top, sub-team boxes stacked vertically below.
+ * Lines never overlap because each team is a self-contained block.
+ */
+import { useEffect, useMemo, useCallback, useState, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
+import {
+  ReactFlow,
+  Controls,
+  Background,
+  BackgroundVariant,
+  MiniMap,
+  useNodesState,
+  useEdgesState,
+  type Node,
+  type Edge,
+  type NodeMouseHandler,
+} from "@xyflow/react";
+import { Network } from "lucide-react";
 import { agentsApi, type OrgNode } from "../api/agents";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
+import { useDialog } from "../context/DialogContext";
 import { queryKeys } from "../lib/queryKeys";
-import { agentUrl } from "../lib/utils";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { AgentIcon } from "../components/AgentIconPicker";
-import { Network } from "lucide-react";
-import { AGENT_ROLE_LABELS, type Agent } from "@paperclipai/shared";
+import { AgentCardNode } from "../components/org-chart/nodes/AgentCardNode";
+import { TeamGroupNode } from "../components/org-chart/nodes/TeamGroupNode";
+import { AgentDetailPanel } from "../components/org-chart/panels/AgentDetailPanel";
+import {
+  OrgChartContextMenu,
+  type ContextMenuState,
+} from "../components/org-chart/OrgChartContextMenu";
+import { OrgChartToolbar } from "../components/org-chart/OrgChartToolbar";
+import { useOrgPositions } from "../hooks/org-chart/useOrgPositions";
+import { useAgentFiles } from "../hooks/org-chart/useAgentFiles";
+import { useDeployState } from "../hooks/org-chart/useDeployState";
+import { TeamManagerPanel, type TeamEntry } from "../components/org-chart/panels/TeamManagerPanel";
+import type { UndeployedMode } from "../components/org-chart/OrgChartToolbar";
+import type { Agent } from "@paperclipai/shared";
+import { EditableEdge } from "../components/org-chart/edges/EditableEdge";
+import "@xyflow/react/dist/style.css";
 
-// Layout constants
-const CARD_W = 200;
-const CARD_H = 100;
-const GAP_X = 32;
-const GAP_Y = 80;
-const PADDING = 60;
+const CW = 190;  // card width
+const CH = 64;   // card height
+const GAP = 8;   // gap between stacked members
+const MGR_GAP = 16; // gap between manager and member stack
+const PAD = 14;  // group box padding
+const PAD_TOP = 28; // group box top padding (for label)
+const TEAM_STACK_GAP = 12; // vertical gap between stacked team boxes
+const SECTION_GAP = 30; // gap between major sections/columns
 
-// ── Tree layout types ───────────────────────────────────────────────────
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const nodeTypes: Record<string, any> = { agentCard: AgentCardNode, teamGroup: TeamGroupNode };
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const edgeTypes: Record<string, any> = { editable: EditableEdge };
 
-interface LayoutNode {
-  id: string;
-  name: string;
-  role: string;
-  status: string;
-  x: number;
-  y: number;
-  children: LayoutNode[];
+const COLORS = [
+  "#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6",
+  "#ec4899","#06b6d4","#f97316","#14b8a6","#6366f1",
+  "#84cc16","#a855f7",
+];
+let gColorIdx = 0;
+function nextColor(): string { return COLORS[gColorIdx++ % COLORS.length]; }
+
+// ── Block measurement & placement ───────────────────────────────────────────
+
+interface Block {
+  node: OrgNode;
+  leaves: OrgNode[];
+  subBlocks: Block[];
+  color: string;
+  w: number;
+  h: number;
 }
 
-// ── Layout algorithm ────────────────────────────────────────────────────
-
-/** Compute the width each subtree needs. */
-function subtreeWidth(node: OrgNode): number {
-  if (node.reports.length === 0) return CARD_W;
-  const childrenW = node.reports.reduce((sum, c) => sum + subtreeWidth(c), 0);
-  const gaps = (node.reports.length - 1) * GAP_X;
-  return Math.max(CARD_W, childrenW + gaps);
+function buildBlock(node: OrgNode): Block {
+  const leaves: OrgNode[] = [];
+  const subBlocks: Block[] = [];
+  for (const c of node.reports) {
+    if (c.reports.length > 0) subBlocks.push(buildBlock(c));
+    else leaves.push(c);
+  }
+  const block: Block = { node, leaves, subBlocks, color: nextColor(), w: 0, h: 0 };
+  measure(block);
+  return block;
 }
 
-/** Recursively assign x,y positions. */
-function layoutTree(node: OrgNode, x: number, y: number): LayoutNode {
-  const totalW = subtreeWidth(node);
-  const layoutChildren: LayoutNode[] = [];
+function measure(b: Block): void {
+  const isLeaf = b.subBlocks.length === 0;
 
-  if (node.reports.length > 0) {
-    const childrenW = node.reports.reduce((sum, c) => sum + subtreeWidth(c), 0);
-    const gaps = (node.reports.length - 1) * GAP_X;
-    let cx = x + (totalW - childrenW - gaps) / 2;
+  if (isLeaf) {
+    // Leaf team: manager LEFT, members stacked RIGHT (max 8 per column)
+    const cols = Math.ceil(b.leaves.length / 8);
+    const colItems = Math.min(b.leaves.length, 8);
+    const stackH = colItems * (CH + GAP) - GAP;
+    const stackW = cols * (CW + GAP) - GAP;
 
-    for (const child of node.reports) {
-      const cw = subtreeWidth(child);
-      layoutChildren.push(layoutTree(child, cx, y + CARD_H + GAP_Y));
-      cx += cw + GAP_X;
+    const innerH = Math.max(CH, stackH);
+    const innerW = CW + (b.leaves.length > 0 ? MGR_GAP + stackW : 0);
+
+    b.w = innerW + PAD * 2;
+    b.h = innerH + PAD_TOP + PAD;
+  } else {
+    // Branch team: manager on top, then leaves row, then sub-blocks stacked vertically
+    let contentW = CW;
+    let contentH = CH; // manager
+
+    // Leaves as a horizontal row below manager
+    if (b.leaves.length > 0) {
+      const leafRowW = b.leaves.length * (CW + GAP) - GAP;
+      contentW = Math.max(contentW, leafRowW);
+      contentH += TEAM_STACK_GAP + CH;
+    }
+
+    // Sub-blocks stacked vertically
+    if (b.subBlocks.length > 0) {
+      contentH += TEAM_STACK_GAP;
+      let maxSubW = 0;
+      let totalSubH = 0;
+      for (const sb of b.subBlocks) {
+        maxSubW = Math.max(maxSubW, sb.w);
+        totalSubH += sb.h + TEAM_STACK_GAP;
+      }
+      totalSubH -= TEAM_STACK_GAP;
+      contentW = Math.max(contentW, maxSubW);
+      contentH += totalSubH;
+    }
+
+    b.w = contentW + PAD * 2;
+    b.h = contentH + PAD_TOP + PAD;
+  }
+}
+
+function place(
+  b: Block,
+  x: number,
+  y: number,
+  agentMap: Map<string, Agent>,
+  companyId: string,
+  out: { nodes: Node[]; edges: Edge[]; groups: Node[] },
+): void {
+  const isLeaf = b.subBlocks.length === 0;
+  const ix = x + PAD;
+  const iy = y + PAD_TOP;
+
+  if (isLeaf) {
+    // Manager on left
+    const mgrY = iy + (Math.max(CH, Math.min(b.leaves.length, 8) * (CH + GAP) - GAP) - CH) / 2;
+    pushAgent(out.nodes, b.node, ix, mgrY, agentMap, companyId, "senior");
+
+    // Members stacked to the right in columns of 8
+    b.leaves.forEach((leaf, i) => {
+      const col = Math.floor(i / 8);
+      const row = i % 8;
+      const lx = ix + CW + MGR_GAP + col * (CW + GAP);
+      const ly = iy + row * (CH + GAP);
+      pushAgent(out.nodes, leaf, lx, ly, agentMap, companyId, "junior");
+      out.edges.push({
+        id: `e:${b.node.id}->${leaf.id}`,
+        source: b.node.id, target: leaf.id,
+        type: "editable",
+        style: { stroke: b.color + "50", strokeWidth: 1 },
+      });
+    });
+  } else {
+    // Manager centered on top
+    const mgrX = x + b.w / 2 - CW / 2;
+    pushAgent(out.nodes, b.node, mgrX, iy, agentMap, companyId, "senior");
+    let curY = iy + CH;
+
+    // Leaves as horizontal row
+    if (b.leaves.length > 0) {
+      curY += TEAM_STACK_GAP;
+      const leafRowW = b.leaves.length * (CW + GAP) - GAP;
+      let leafX = x + b.w / 2 - leafRowW / 2;
+      for (const leaf of b.leaves) {
+        pushAgent(out.nodes, leaf, leafX, curY, agentMap, companyId, "junior");
+        out.edges.push({
+          id: `e:${b.node.id}->${leaf.id}`,
+          source: b.node.id, target: leaf.id,
+          type: "editable",
+          style: { stroke: b.color + "50", strokeWidth: 1 },
+        });
+        leafX += CW + GAP;
+      }
+      curY += CH;
+    }
+
+    // Sub-blocks stacked vertically, left-aligned
+    if (b.subBlocks.length > 0) {
+      curY += TEAM_STACK_GAP;
+      for (const sb of b.subBlocks) {
+        place(sb, x + PAD, curY, agentMap, companyId, out);
+        out.edges.push({
+          id: `e:${b.node.id}->${sb.node.id}`,
+          source: b.node.id, target: sb.node.id,
+          type: "editable",
+          style: { stroke: "var(--border)", strokeWidth: 1.5 },
+        });
+        curY += sb.h + TEAM_STACK_GAP;
+      }
     }
   }
 
-  return {
-    id: node.id,
-    name: node.name,
-    role: node.role,
-    status: node.status,
-    x: x + (totalW - CARD_W) / 2,
-    y,
-    children: layoutChildren,
-  };
-}
-
-/** Layout all root nodes side by side. */
-function layoutForest(roots: OrgNode[]): LayoutNode[] {
-  if (roots.length === 0) return [];
-
-  const totalW = roots.reduce((sum, r) => sum + subtreeWidth(r), 0);
-  const gaps = (roots.length - 1) * GAP_X;
-  let x = PADDING;
-  const y = PADDING;
-
-  const result: LayoutNode[] = [];
-  for (const root of roots) {
-    const w = subtreeWidth(root);
-    result.push(layoutTree(root, x, y));
-    x += w + GAP_X;
+  // Group box
+  if (b.leaves.length > 0 || b.subBlocks.length > 0) {
+    out.groups.push({
+      id: `group-${b.node.id}`,
+      type: "teamGroup",
+      position: { x, y },
+      style: { width: b.w, height: b.h },
+      data: { label: teamLabelWithOverride(b.node, agentMap), color: b.color },
+      zIndex: 0, selectable: false, draggable: false,
+    });
   }
-
-  // Compute bounds and return
-  return result;
 }
 
-/** Flatten layout tree to list of nodes. */
-function flattenLayout(nodes: LayoutNode[]): LayoutNode[] {
-  const result: LayoutNode[] = [];
-  function walk(n: LayoutNode) {
-    result.push(n);
-    n.children.forEach(walk);
-  }
-  nodes.forEach(walk);
-  return result;
+// Map manager names to the team names Mario specified
+const TEAM_NAME_MAP: Record<string, string> = {
+  "Vance": "Authority Team",
+  "Cassius": "Programmatic Pages Team",
+  "Maren": "Review Intelligence Team",
+  "Drake": "Technical SEO / Infrastructure Team",
+  "Silas": "Data Expansion Team",
+  "Callista": "Content Division",
+  "Lennox": "BOR Authority Content Team",
+  "Beacon": "Lead Intelligence Team",
+  "Striker": "Outbound Sales Team",
+  "Ledger": "Revenue Operations Team",
+  "Catalyst": "Growth Strategy Team",
+  "Echo": "Engineering",
+  "Iris": "Operations",
+  "Apollo": "Growth",
+  "Quinn 2": "Client Growth Content Team",
+};
+
+let _teamNameOverrides: Record<string, string> = {};
+
+function teamLabelWithOverride(node: OrgNode, agentMap: Map<string, Agent>): string {
+  if (_teamNameOverrides[node.id]) return _teamNameOverrides[node.id];
+  return teamLabel(node, agentMap);
 }
 
-/** Collect all parent→child edges. */
-function collectEdges(nodes: LayoutNode[]): Array<{ parent: LayoutNode; child: LayoutNode }> {
-  const edges: Array<{ parent: LayoutNode; child: LayoutNode }> = [];
-  function walk(n: LayoutNode) {
-    for (const c of n.children) {
-      edges.push({ parent: n, child: c });
-      walk(c);
+function teamLabel(node: OrgNode, agentMap: Map<string, Agent>): string {
+  // Check explicit map first
+  if (TEAM_NAME_MAP[node.name]) return TEAM_NAME_MAP[node.name];
+
+  // Fall back to deriving from title
+  const agent = agentMap.get(node.id);
+  const title = agent?.title ?? "";
+  const cleaned = title
+    .replace(/\s*(Manager|Director)\s*$/i, "")
+    .trim();
+  if (cleaned.length > 2) return cleaned;
+  return node.name + "'s Team";
+}
+
+function pushAgent(
+  nodes: Node[], orgNode: OrgNode, x: number, y: number,
+  agentMap: Map<string, Agent>, companyId: string, tier: string,
+): void {
+  const agent = agentMap.get(orgNode.id);
+  const meta = (agent?.metadata ?? {}) as Record<string, unknown>;
+  nodes.push({
+    id: orgNode.id, type: "agentCard",
+    position: { x, y },
+    data: {
+      name: orgNode.name, role: orgNode.role, status: orgNode.status,
+      title: agent?.title ?? null, icon: agent?.icon ?? null,
+      adapterType: agent?.adapterType ?? "",
+      tier, avatar: (meta.avatarUrl as string) ?? null,
+      companyId, agentId: orgNode.id,
+    },
+    zIndex: 10,
+  });
+}
+
+// ── Main layout ─────────────────────────────────────────────────────────────
+
+function buildFullLayout(
+  orgTree: OrgNode[], agentMap: Map<string, Agent>, companyId: string,
+): { nodes: Node[]; edges: Edge[] } {
+  gColorIdx = 0;
+  const out = { nodes: [] as Node[], edges: [] as Edge[], groups: [] as Node[] };
+
+  const atlasNode = orgTree.find((n) => n.role === "ceo");
+  const peers = orgTree.filter((n) => n !== atlasNode && n.reports.length === 0);
+
+  // Atlas elevated center
+  const cx = 1500;
+  let y = 40;
+
+  if (atlasNode) {
+    pushAgent(out.nodes, atlasNode, cx, y, agentMap, companyId, "oversight");
+
+    // Peers flanking
+    peers.forEach((peer, i) => {
+      const px = i === 0 ? cx - CW - 60 : cx + CW + 60;
+      pushAgent(out.nodes, peer, px, y + 30, agentMap, companyId, "oversight");
+      out.edges.push({
+        id: `peer:${atlasNode.id}->${peer.id}`,
+        source: atlasNode.id, target: peer.id,
+        type: "editable",
+        style: { stroke: "var(--border)", strokeWidth: 1, strokeDasharray: "4 4" },
+      });
+    });
+
+    y += CH + SECTION_GAP;
+
+    // Atlas's direct reports — build blocks and stack vertically on the left
+    const blocks: Block[] = [];
+    const directLeaves: OrgNode[] = [];
+
+    for (const child of atlasNode.reports) {
+      if (child.reports.length > 0) blocks.push(buildBlock(child));
+      else directLeaves.push(child);
+    }
+
+    // Direct leaves as a row
+    if (directLeaves.length > 0) {
+      const rowW = directLeaves.length * (CW + GAP) - GAP;
+      let lx = cx + CW / 2 - rowW / 2;
+      for (const leaf of directLeaves) {
+        pushAgent(out.nodes, leaf, lx, y, agentMap, companyId, "senior");
+        out.edges.push({
+          id: `e:${atlasNode.id}->${leaf.id}`,
+          source: atlasNode.id, target: leaf.id,
+          type: "editable",
+          style: { stroke: "var(--border)", strokeWidth: 1.5 },
+        });
+        lx += CW + GAP;
+      }
+      y += CH + SECTION_GAP;
+    }
+
+    // Team blocks — arrange in columns to keep it compact
+    // Put them in 2 columns if there are many
+    const COL_COUNT = blocks.length > 6 ? 3 : blocks.length > 2 ? 2 : 1;
+    const colBlocks: Block[][] = Array.from({ length: COL_COUNT }, () => []);
+    const colHeights = new Array(COL_COUNT).fill(0);
+
+    // Distribute blocks into columns (shortest column first)
+    for (const blk of blocks) {
+      let minCol = 0;
+      for (let c = 1; c < COL_COUNT; c++) {
+        if (colHeights[c] < colHeights[minCol]) minCol = c;
+      }
+      colBlocks[minCol].push(blk);
+      colHeights[minCol] += blk.h + TEAM_STACK_GAP;
+    }
+
+    // Find max column width for positioning
+    const colWidths = colBlocks.map((col) =>
+      col.reduce((max, blk) => Math.max(max, blk.w), 0),
+    );
+    const totalW = colWidths.reduce((s, w) => s + w + SECTION_GAP, -SECTION_GAP);
+    let colX = cx + CW / 2 - totalW / 2;
+
+    for (let c = 0; c < COL_COUNT; c++) {
+      let colY = y;
+      for (const blk of colBlocks[c]) {
+        place(blk, colX, colY, agentMap, companyId, out);
+        out.edges.push({
+          id: `e:${atlasNode.id}->${blk.node.id}`,
+          source: atlasNode.id, target: blk.node.id,
+          type: "editable",
+          style: { stroke: "var(--border)", strokeWidth: 1.5 },
+        });
+        colY += blk.h + TEAM_STACK_GAP;
+      }
+      colX += colWidths[c] + SECTION_GAP;
     }
   }
-  nodes.forEach(walk);
-  return edges;
+
+  return { nodes: [...out.groups, ...out.nodes], edges: out.edges };
 }
 
-// ── Status dot colors (raw hex for SVG) ─────────────────────────────────
-
-const adapterLabels: Record<string, string> = {
-  claude_local: "Claude",
-  codex_local: "Codex",
-  gemini_local: "Gemini",
-  opencode_local: "OpenCode",
-  cursor: "Cursor",
-  openclaw_gateway: "OpenClaw Gateway",
-  process: "Process",
-  http: "HTTP",
-};
-
-const statusDotColor: Record<string, string> = {
-  running: "#22d3ee",
-  active: "#4ade80",
-  paused: "#facc15",
-  idle: "#facc15",
-  error: "#f87171",
-  terminated: "#a3a3a3",
-};
-const defaultDotColor = "#a3a3a3";
-
-// ── Main component ──────────────────────────────────────────────────────
+// ── OrgChart component ──────────────────────────────────────────────────────
 
 export function OrgChart() {
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
-  const navigate = useNavigate();
+  const { openNewAgent } = useDialog();
+  const [showMinimap, setShowMinimap] = useState(true);
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const initializedRef = useRef(false);
+  const { clearPositions } = useOrgPositions(selectedCompanyId ?? null);
+  const { getFile, setFile } = useAgentFiles();
+  const { isDeployed, toggleDeploy } = useDeployState();
+  const [undeployedMode, setUndeployedMode] = useState<UndeployedMode>("show");
+  const [showTeamBoxes, setShowTeamBoxes] = useState(true);
+  const [showEdges, setShowEdges] = useState(true);
+  const [hiddenTeams, setHiddenTeams] = useState<Set<string>>(new Set());
+  const [teamNameOverrides, setTeamNameOverrides] = useState<Record<string, string>>(() => {
+    try { return JSON.parse(localStorage.getItem("orgchart-team-names") ?? "{}"); } catch { return {}; }
+  });
+  const [showTeamManager, setShowTeamManager] = useState(false);
+
+  useEffect(() => { setBreadcrumbs([{ label: "Org Chart" }]); }, [setBreadcrumbs]);
 
   const { data: orgTree, isLoading } = useQuery({
     queryKey: queryKeys.org(selectedCompanyId!),
     queryFn: () => agentsApi.org(selectedCompanyId!),
-    enabled: !!selectedCompanyId,
+    enabled: !!selectedCompanyId, refetchInterval: 30_000,
   });
-
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
     queryFn: () => agentsApi.list(selectedCompanyId!),
@@ -161,269 +419,200 @@ export function OrgChart() {
     return m;
   }, [agents]);
 
+  const layout = useMemo(() => {
+    if (!orgTree?.length || !selectedCompanyId) return null;
+    _teamNameOverrides = teamNameOverrides;
+    return buildFullLayout(orgTree, agentMap, selectedCompanyId);
+  }, [orgTree, agentMap, selectedCompanyId, teamNameOverrides]);
+
+  const [nodes, setNodes, onNodesChange] = useNodesState(layout?.nodes ?? []);
+  const [edges, setEdges] = useEdgesState(layout?.edges ?? []);
+
+  // Apply deploy state + mode to nodes/edges
+  const visibleLayout = useMemo(() => {
+    if (!layout) return null;
+    const nodesWithDeploy = layout.nodes.map((n) => {
+      if (n.type === "teamGroup") return n;
+      const deployed = isDeployed(n.id);
+      return {
+        ...n,
+        data: { ...n.data, deployed, onToggleDeploy: toggleDeploy },
+        hidden: !deployed && undeployedMode === "hide",
+      };
+    });
+    // Hide edges to/from hidden nodes
+    const hiddenIds = new Set(nodesWithDeploy.filter((n) => n.hidden).map((n) => n.id));
+    const visibleEdges = layout.edges.map((e) => ({
+      ...e,
+      hidden: hiddenIds.has(e.source) || hiddenIds.has(e.target),
+    }));
+    // Hide empty group boxes when all their members are hidden
+    const finalNodes = nodesWithDeploy.map((n) => {
+      if (n.type !== "teamGroup") return n;
+      const groupId = n.id.replace("group-", "");
+      const hasVisibleMember = nodesWithDeploy.some(
+        (mn) => mn.type === "agentCard" && !mn.hidden && layout.edges.some(
+          (e) => (e.source === groupId && e.target === mn.id) || (e.source === mn.id && e.target === groupId),
+        ),
+      );
+      // Keep group visible if the manager itself is visible
+      const managerVisible = !hiddenIds.has(groupId);
+      return { ...n, hidden: !managerVisible && !hasVisibleMember };
+    });
+    // Apply team box toggle + per-team hide
+    const nodesWithBoxToggle = finalNodes.map((n) => {
+      if (n.type === "teamGroup") {
+        if (!showTeamBoxes) return { ...n, hidden: true };
+        const managerId = n.id.replace("group-", "");
+        if (hiddenTeams.has(managerId)) return { ...n, hidden: true };
+      }
+      return n;
+    });
+    // Apply edge toggle
+    const finalEdges = showEdges ? visibleEdges : visibleEdges.map((e) => ({ ...e, hidden: true }));
+    return { nodes: nodesWithBoxToggle, edges: finalEdges };
+  }, [layout, isDeployed, toggleDeploy, undeployedMode, showTeamBoxes, showEdges, hiddenTeams]);
+
   useEffect(() => {
-    setBreadcrumbs([{ label: "Org Chart" }]);
-  }, [setBreadcrumbs]);
-
-  // Layout computation
-  const layout = useMemo(() => layoutForest(orgTree ?? []), [orgTree]);
-  const allNodes = useMemo(() => flattenLayout(layout), [layout]);
-  const edges = useMemo(() => collectEdges(layout), [layout]);
-
-  // Compute SVG bounds
-  const bounds = useMemo(() => {
-    if (allNodes.length === 0) return { width: 800, height: 600 };
-    let maxX = 0, maxY = 0;
-    for (const n of allNodes) {
-      maxX = Math.max(maxX, n.x + CARD_W);
-      maxY = Math.max(maxY, n.y + CARD_H);
+    if (visibleLayout && !initializedRef.current) {
+      setNodes(visibleLayout.nodes); setEdges(visibleLayout.edges); initializedRef.current = true;
     }
-    return { width: maxX + PADDING, height: maxY + PADDING };
-  }, [allNodes]);
+  }, [visibleLayout, setNodes, setEdges]);
 
-  // Pan & zoom state
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState(1);
-  const [dragging, setDragging] = useState(false);
-  const dragStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
-
-  // Center the chart on first load
-  const hasInitialized = useRef(false);
+  // Re-apply deploy state when mode or deploy map changes
   useEffect(() => {
-    if (hasInitialized.current || allNodes.length === 0 || !containerRef.current) return;
-    hasInitialized.current = true;
+    if (visibleLayout && initializedRef.current) {
+      setNodes(visibleLayout.nodes); setEdges(visibleLayout.edges);
+    }
+  }, [undeployedMode, isDeployed, showTeamBoxes, showEdges, hiddenTeams]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const container = containerRef.current;
-    const containerW = container.clientWidth;
-    const containerH = container.clientHeight;
-
-    // Fit chart to container
-    const scaleX = (containerW - 40) / bounds.width;
-    const scaleY = (containerH - 40) / bounds.height;
-    const fitZoom = Math.min(scaleX, scaleY, 1);
-
-    const chartW = bounds.width * fitZoom;
-    const chartH = bounds.height * fitZoom;
-
-    setZoom(fitZoom);
-    setPan({
-      x: (containerW - chartW) / 2,
-      y: (containerH - chartH) / 2,
-    });
-  }, [allNodes, bounds]);
-
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    if (e.button !== 0) return;
-    // Don't drag if clicking a card
-    const target = e.target as HTMLElement;
-    if (target.closest("[data-org-card]")) return;
-    setDragging(true);
-    dragStart.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
-  }, [pan]);
-
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!dragging) return;
-    const dx = e.clientX - dragStart.current.x;
-    const dy = e.clientY - dragStart.current.y;
-    setPan({ x: dragStart.current.panX + dx, y: dragStart.current.panY + dy });
-  }, [dragging]);
-
-  const handleMouseUp = useCallback(() => {
-    setDragging(false);
+  const onNodeClick: NodeMouseHandler = useCallback((_e, n) => {
+    if (n.type === "teamGroup") return;
+    setSelectedAgentId(n.id); setContextMenu(null);
   }, []);
-
-  const handleWheel = useCallback((e: React.WheelEvent) => {
+  const onNodeContextMenu: NodeMouseHandler = useCallback((e, n) => {
     e.preventDefault();
-    const container = containerRef.current;
-    if (!container) return;
+    if (n.type === "teamGroup") {
+      const managerId = n.id.replace("group-", "");
+      const label = (n.data as { label?: string }).label ?? "Team";
+      setContextMenu({ x: e.clientX, y: e.clientY, nodeId: managerId, nodeName: label, isTeam: true });
+      return;
+    }
+    setContextMenu({ x: e.clientX, y: e.clientY, nodeId: n.id, nodeName: (n.data as { name?: string }).name ?? n.id });
+  }, []);
+  const onPaneClick = useCallback(() => setContextMenu(null), []);
 
-    const rect = container.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
+  const handleAvatarChange = useCallback((id: string, url: string) => {
+    setNodes((nds) => nds.map((n) => n.id === id ? { ...n, data: { ...n.data, avatar: url } } : n));
+  }, [setNodes]);
 
-    const factor = e.deltaY < 0 ? 1.1 : 0.9;
-    const newZoom = Math.min(Math.max(zoom * factor, 0.2), 2);
+  const handleResetLayout = useCallback(() => {
+    clearPositions();
+    if (!orgTree?.length || !selectedCompanyId) return;
+    initializedRef.current = false;
+    const fresh = buildFullLayout(orgTree, agentMap, selectedCompanyId);
+    setNodes(fresh.nodes); setEdges(fresh.edges);
+  }, [clearPositions, orgTree, agentMap, setNodes, setEdges, selectedCompanyId]);
 
-    // Zoom toward mouse position
-    const scale = newZoom / zoom;
-    setPan({
-      x: mouseX - scale * (mouseX - pan.x),
-      y: mouseY - scale * (mouseY - pan.y),
-    });
-    setZoom(newZoom);
-  }, [zoom, pan]);
+  // Collect team entries for the manager panel
+  const teamEntries: TeamEntry[] = useMemo(() => {
+    if (!layout) return [];
+    return layout.nodes
+      .filter((n) => n.type === "teamGroup")
+      .map((n) => ({
+        managerId: n.id.replace("group-", ""),
+        label: (n.data as { label: string }).label,
+        color: (n.data as { color: string }).color,
+      }));
+  }, [layout]);
 
-  if (!selectedCompanyId) {
-    return <EmptyState icon={Network} message="Select a company to view the org chart." />;
-  }
+  const selectedAgent = selectedAgentId ? agentMap.get(selectedAgentId) ?? null : null;
 
-  if (isLoading) {
-    return <PageSkeleton variant="org-chart" />;
-  }
-
-  if (orgTree && orgTree.length === 0) {
-    return <EmptyState icon={Network} message="No organizational hierarchy defined." />;
-  }
+  if (!selectedCompanyId) return <EmptyState icon={Network} message="Select a company to view the org chart." />;
+  if (isLoading) return <PageSkeleton variant="org-chart" />;
+  if (orgTree && !orgTree.length) return <EmptyState icon={Network} message="No organizational hierarchy defined." />;
 
   return (
-    <div
-      ref={containerRef}
-      className="w-full h-[calc(100vh-4rem)] overflow-hidden relative bg-muted/20 border border-border rounded-lg"
-      style={{ cursor: dragging ? "grabbing" : "grab" }}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
-      onWheel={handleWheel}
-    >
-      {/* Zoom controls */}
-      <div className="absolute top-3 right-3 z-10 flex flex-col gap-1">
-        <button
-          className="w-7 h-7 flex items-center justify-center bg-background border border-border rounded text-sm hover:bg-accent transition-colors"
-          onClick={() => {
-            const newZoom = Math.min(zoom * 1.2, 2);
-            const container = containerRef.current;
-            if (container) {
-              const cx = container.clientWidth / 2;
-              const cy = container.clientHeight / 2;
-              const scale = newZoom / zoom;
-              setPan({ x: cx - scale * (cx - pan.x), y: cy - scale * (cy - pan.y) });
-            }
-            setZoom(newZoom);
+    <div className="flex h-[calc(100vh-4rem)]">
+      <div className="flex-1 relative border border-border rounded-lg overflow-hidden">
+        <ReactFlow
+          nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
+          onNodesChange={onNodesChange} onNodeClick={onNodeClick}
+          onNodeContextMenu={onNodeContextMenu} onPaneClick={onPaneClick}
+          onEdgesChange={(changes) => {
+            // Allow edge selection and updates
+            setEdges((eds) => {
+              let updated = [...eds];
+              for (const change of changes) {
+                if (change.type === "select") {
+                  updated = updated.map((e) => e.id === change.id ? { ...e, selected: change.selected } : e);
+                }
+              }
+              return updated;
+            });
           }}
-          aria-label="Zoom in"
+          defaultEdgeOptions={{ type: "editable", style: { strokeWidth: 1.5, stroke: "var(--border)" } }}
+          fitView fitViewOptions={{ padding: 0.05 }} minZoom={0.05} maxZoom={2}
+          edgesReconnectable
+          selectionOnDrag
+          selectionMode={"partial" as any}
+          multiSelectionKeyCode="Shift"
+          proOptions={{ hideAttribution: true }}
         >
-          +
-        </button>
-        <button
-          className="w-7 h-7 flex items-center justify-center bg-background border border-border rounded text-sm hover:bg-accent transition-colors"
-          onClick={() => {
-            const newZoom = Math.max(zoom * 0.8, 0.2);
-            const container = containerRef.current;
-            if (container) {
-              const cx = container.clientWidth / 2;
-              const cy = container.clientHeight / 2;
-              const scale = newZoom / zoom;
-              setPan({ x: cx - scale * (cx - pan.x), y: cy - scale * (cy - pan.y) });
-            }
-            setZoom(newZoom);
-          }}
-          aria-label="Zoom out"
-        >
-          &minus;
-        </button>
-        <button
-          className="w-7 h-7 flex items-center justify-center bg-background border border-border rounded text-[10px] hover:bg-accent transition-colors"
-          onClick={() => {
-            if (!containerRef.current) return;
-            const cW = containerRef.current.clientWidth;
-            const cH = containerRef.current.clientHeight;
-            const scaleX = (cW - 40) / bounds.width;
-            const scaleY = (cH - 40) / bounds.height;
-            const fitZoom = Math.min(scaleX, scaleY, 1);
-            const chartW = bounds.width * fitZoom;
-            const chartH = bounds.height * fitZoom;
-            setZoom(fitZoom);
-            setPan({ x: (cW - chartW) / 2, y: (cH - chartH) / 2 });
-          }}
-          title="Fit to screen"
-          aria-label="Fit chart to screen"
-        >
-          Fit
-        </button>
+          <Controls showInteractive={false} />
+          <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="var(--border)" />
+          {showMinimap && <MiniMap nodeStrokeWidth={2} className="!bg-card !border-border" maskColor="rgba(0,0,0,0.1)" />}
+          <OrgChartToolbar onAddAgent={openNewAgent} onResetLayout={handleResetLayout}
+            showMinimap={showMinimap} onToggleMinimap={() => setShowMinimap(v => !v)}
+            undeployedMode={undeployedMode}
+            onCycleUndeployedMode={() => setUndeployedMode(m => m === "show" ? "dim" : m === "dim" ? "hide" : "show")}
+            showTeamBoxes={showTeamBoxes} onToggleTeamBoxes={() => setShowTeamBoxes(v => !v)}
+            showEdges={showEdges} onToggleEdges={() => setShowEdges(v => !v)}
+            onOpenTeamManager={() => setShowTeamManager(v => !v)} />
+        </ReactFlow>
+        {showTeamManager && (
+          <TeamManagerPanel
+            teams={teamEntries}
+            hiddenTeams={hiddenTeams}
+            onToggleTeam={(managerId) => {
+              setHiddenTeams((prev) => {
+                const next = new Set(prev);
+                if (next.has(managerId)) next.delete(managerId);
+                else next.add(managerId);
+                return next;
+              });
+            }}
+            onRenameTeam={(managerId, newName) => {
+              setTeamNameOverrides((prev) => {
+                const next = { ...prev, [managerId]: newName };
+                localStorage.setItem("orgchart-team-names", JSON.stringify(next));
+                return next;
+              });
+              // Force re-layout
+              initializedRef.current = false;
+            }}
+            onClose={() => setShowTeamManager(false)}
+          />
+        )}
+        {contextMenu && (
+          <OrgChartContextMenu menu={contextMenu} onClose={() => setContextMenu(null)}
+            onEdit={(id) => { setSelectedAgentId(id); setContextMenu(null); }}
+            onDelete={() => setContextMenu(null)}
+            onToggleTeam={(managerId) => {
+              setHiddenTeams((prev) => {
+                const next = new Set(prev);
+                if (next.has(managerId)) next.delete(managerId);
+                else next.add(managerId);
+                return next;
+              });
+            }}
+            isTeamHidden={(managerId) => hiddenTeams.has(managerId)} />
+        )}
       </div>
-
-      {/* SVG layer for edges */}
-      <svg
-        className="absolute inset-0 pointer-events-none"
-        style={{
-          width: "100%",
-          height: "100%",
-        }}
-      >
-        <g transform={`translate(${pan.x}, ${pan.y}) scale(${zoom})`}>
-          {edges.map(({ parent, child }) => {
-            const x1 = parent.x + CARD_W / 2;
-            const y1 = parent.y + CARD_H;
-            const x2 = child.x + CARD_W / 2;
-            const y2 = child.y;
-            const midY = (y1 + y2) / 2;
-
-            return (
-              <path
-                key={`${parent.id}-${child.id}`}
-                d={`M ${x1} ${y1} L ${x1} ${midY} L ${x2} ${midY} L ${x2} ${y2}`}
-                fill="none"
-                stroke="var(--border)"
-                strokeWidth={1.5}
-              />
-            );
-          })}
-        </g>
-      </svg>
-
-      {/* Card layer */}
-      <div
-        className="absolute inset-0"
-        style={{
-          transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-          transformOrigin: "0 0",
-        }}
-      >
-        {allNodes.map((node) => {
-          const agent = agentMap.get(node.id);
-          const dotColor = statusDotColor[node.status] ?? defaultDotColor;
-
-          return (
-            <div
-              key={node.id}
-              data-org-card
-              className="absolute bg-card border border-border rounded-lg shadow-sm hover:shadow-md hover:border-foreground/20 transition-[box-shadow,border-color] duration-150 cursor-pointer select-none"
-              style={{
-                left: node.x,
-                top: node.y,
-                width: CARD_W,
-                minHeight: CARD_H,
-              }}
-              onClick={() => navigate(agent ? agentUrl(agent) : `/agents/${node.id}`)}
-            >
-              <div className="flex items-center px-4 py-3 gap-3">
-                {/* Agent icon + status dot */}
-                <div className="relative shrink-0">
-                  <div className="w-9 h-9 rounded-full bg-muted flex items-center justify-center">
-                    <AgentIcon icon={agent?.icon} className="h-4.5 w-4.5 text-foreground/70" />
-                  </div>
-                  <span
-                    className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-card"
-                    style={{ backgroundColor: dotColor }}
-                  />
-                </div>
-                {/* Name + role + adapter type */}
-                <div className="flex flex-col items-start min-w-0 flex-1">
-                  <span className="text-sm font-semibold text-foreground leading-tight">
-                    {node.name}
-                  </span>
-                  <span className="text-[11px] text-muted-foreground leading-tight mt-0.5">
-                    {agent?.title ?? roleLabel(node.role)}
-                  </span>
-                  {agent && (
-                    <span className="text-[10px] text-muted-foreground/60 font-mono leading-tight mt-1">
-                      {adapterLabels[agent.adapterType] ?? agent.adapterType}
-                    </span>
-                  )}
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      {selectedAgent && (
+        <AgentDetailPanel agent={selectedAgent} onClose={() => setSelectedAgentId(null)}
+          onAvatarChange={handleAvatarChange} getFile={getFile} setFile={setFile} />
+      )}
     </div>
   );
-}
-
-const roleLabels = AGENT_ROLE_LABELS as Record<string, string>;
-
-function roleLabel(role: string): string {
-  return roleLabels[role] ?? role;
 }
