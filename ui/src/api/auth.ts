@@ -24,8 +24,10 @@ function toSession(value: unknown): AuthSession | null {
   };
 }
 
+const AUTH_BASE = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/auth` : "/api/auth";
+
 async function authPost(path: string, body: Record<string, unknown>) {
-  const res = await fetch(`/api/auth${path}`, {
+  const res = await fetch(`${AUTH_BASE}${path}`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
@@ -45,7 +47,7 @@ async function authPost(path: string, body: Record<string, unknown>) {
 
 export const authApi = {
   getSession: async (): Promise<AuthSession | null> => {
-    const res = await fetch("/api/auth/get-session", {
+    const res = await fetch(`${AUTH_BASE}/get-session`, {
       credentials: "include",
       headers: { Accept: "application/json" },
     });
