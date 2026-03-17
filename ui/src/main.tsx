@@ -4,6 +4,7 @@ import * as ReactDOM from "react-dom";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "@/lib/router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ClerkProvider } from "@clerk/react";
 import { App } from "./App";
 import { CompanyProvider } from "./context/CompanyContext";
 import { LiveUpdatesProvider } from "./context/LiveUpdatesProvider";
@@ -36,7 +37,9 @@ const queryClient = new QueryClient({
   },
 });
 
-createRoot(document.getElementById("root")!).render(
+const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+
+const AppTree = (
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
@@ -64,4 +67,14 @@ createRoot(document.getElementById("root")!).render(
       </ThemeProvider>
     </QueryClientProvider>
   </StrictMode>
+);
+
+createRoot(document.getElementById("root")!).render(
+  clerkPublishableKey ? (
+    <ClerkProvider publishableKey={clerkPublishableKey} afterSignOutUrl="/auth">
+      {AppTree}
+    </ClerkProvider>
+  ) : (
+    AppTree
+  ),
 );
