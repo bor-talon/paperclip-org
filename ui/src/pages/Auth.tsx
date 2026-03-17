@@ -6,6 +6,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { AsciiArtAnimation } from "@/components/AsciiArtAnimation";
 import { Sparkles } from "lucide-react";
+import { SignIn } from "@clerk/react";
 
 type AuthMode = "sign_in" | "sign_up";
 
@@ -64,6 +65,22 @@ export function AuthPage() {
     return (
       <div className="fixed inset-0 flex items-center justify-center">
         <p className="text-sm text-muted-foreground">Loading…</p>
+      </div>
+    );
+  }
+
+  // When Clerk is configured, delegate entirely to Clerk's prebuilt sign-in UI.
+  // Google OAuth (and any other social providers) are enabled via the Clerk Dashboard.
+  const clerkKey = typeof import.meta !== "undefined" && (import.meta as { env?: Record<string, string> }).env?.VITE_CLERK_PUBLISHABLE_KEY;
+  if (clerkKey) {
+    return (
+      <div className="fixed inset-0 flex bg-background">
+        <div className="w-full md:w-1/2 flex flex-col items-center justify-center">
+          <SignIn routing="hash" />
+        </div>
+        <div className="hidden md:block w-1/2 overflow-hidden">
+          <AsciiArtAnimation />
+        </div>
       </div>
     );
   }
