@@ -1,17 +1,16 @@
 {
   "version": 2,
   "installCommand": "npm i -g pnpm@9 && pnpm install",
-  "buildCommand": "pnpm --filter @paperclipai/ui build",
+  "buildCommand": "pnpm --filter @paperclipai/ui build && node api/build.mjs",
   "outputDirectory": "ui/dist",
   "framework": "vite",
   "functions": {
-    "api/index.ts": {
-      "maxDuration": 30,
-      "includeFiles": "server/**,packages/**"
+    "api/index.js": {
+      "maxDuration": 30
     }
   },
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index.ts" },
+    { "source": "/api/(.*)", "destination": "/api/index.js" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
