@@ -67,6 +67,28 @@ export async function createApp(
 ) {
   const app = express();
 
+  // CORS: allow cross-origin requests from the frontend when deployed separately
+  const frontendOrigin = process.env.PAPERCLIP_FRONTEND_ORIGIN;
+  if (frontendOrigin) {
+    const allowedOrigins = new Set(
+      frontendOrigin.split(",").map((o) => o.trim()).filter(Boolean),
+    );
+    app.use((req, res, next) => {
+      const origin = req.headers.origin;
+      if (origin && allowedOrigins.has(origin)) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Access-Control-Allow-Credentials", "true");
+        res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+      }
+      if (req.method === "OPTIONS") {
+        res.sendStatus(204);
+        return;
+      }
+      next();
+    });
+  }
+
   app.use(express.json({
     verify: (req, _res, buf) => {
       (req as unknown as { rawBody: Buffer }).rawBody = buf;
