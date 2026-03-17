@@ -35,7 +35,7 @@ const linkStyle: CSSProperties = {
   marginTop: 4,
 };
 
-export function ReviewWidget({ context }: PluginWidgetProps) {
+export function ReviewWidget(_props: PluginWidgetProps) {
   const { data: stats } = useReviewStats();
   const { data: pending } = usePendingCards();
 

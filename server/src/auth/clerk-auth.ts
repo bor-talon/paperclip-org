@@ -12,6 +12,12 @@ import type { BetterAuthSessionResult } from "./better-auth.js";
 
 export type { BetterAuthSessionResult as ClerkSessionResult };
 
+/** Module-level Clerk client singleton — reused across all requests. */
+const clerkClient = createClerkClient({
+  secretKey: process.env.CLERK_SECRET_KEY,
+  publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
+});
+
 /**
  * Returns the Express middleware that installs Clerk's auth context on every
  * request. Must be mounted before any route that calls `resolveClerkSession`.
@@ -35,11 +41,7 @@ export async function resolveClerkSession(
   let name: string | null = null;
 
   try {
-    const client = createClerkClient({
-      secretKey: process.env.CLERK_SECRET_KEY,
-      publishableKey: process.env.CLERK_PUBLISHABLE_KEY,
-    });
-    const user = await client.users.getUser(userId);
+    const user = await clerkClient.users.getUser(userId);
     email = user.emailAddresses[0]?.emailAddress ?? null;
     name = [user.firstName, user.lastName].filter(Boolean).join(" ") || null;
   } catch {

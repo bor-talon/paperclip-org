@@ -131,6 +131,7 @@ async function registerActionHandlers(ctx: PluginContext): Promise<void> {
     const cardKey = `card:${cardId}`;
     const card = await getState<ResearchCard>(ctx, cardKey);
     if (!card) throw new Error(`Card ${cardId} not found`);
+    if (!card.swipeDirection) throw new Error(`Card ${cardId} has not been swiped yet — call swipe-card first`);
 
     card.score = score;
     card.feedback = feedback ?? "";
@@ -142,7 +143,7 @@ async function registerActionHandlers(ctx: PluginContext): Promise<void> {
       cardId,
       score,
       feedback: feedback ?? "",
-      direction: card.swipeDirection ?? "right",
+      direction: card.swipeDirection,
       timestamp: new Date().toISOString(),
     });
     await setState(ctx, "feedback-queue", queue);
