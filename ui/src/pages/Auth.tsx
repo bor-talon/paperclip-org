@@ -71,7 +71,7 @@ export function AuthPage() {
 
   // When Clerk is configured, delegate entirely to Clerk's prebuilt sign-in UI.
   // Google OAuth (and any other social providers) are enabled via the Clerk Dashboard.
-  const clerkKey = typeof import.meta !== "undefined" && (import.meta as { env?: Record<string, string> }).env?.VITE_CLERK_PUBLISHABLE_KEY;
+  const clerkKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
   if (clerkKey) {
     return (
       <div className="fixed inset-0 flex bg-background">

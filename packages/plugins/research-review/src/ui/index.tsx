@@ -216,13 +216,13 @@ function ResearchReviewPageInner() {
 
 // ── Exports (match manifest slot exportNames) ──────────────────────────────
 
-export function ResearchReviewPage({ context }: PluginPageProps) {
+export function ResearchReviewPage(_props: PluginPageProps) {
   return <ResearchReviewPageInner />;
 }
 
 export { ReviewWidget } from "./DashboardWidget.js";
 
-export function ResearchReviewSidebarLink({ context }: PluginSidebarProps) {
+export function ResearchReviewSidebarLink(_props: PluginSidebarProps) {
   return (
     <a
       href={`/plugins/${PAGE_ROUTE}`}
