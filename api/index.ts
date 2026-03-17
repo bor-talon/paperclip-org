@@ -1,6 +1,6 @@
 /**
  * Vercel serverless entry point.
- * Creates a slim Express app for the Paperclip API.
+ * Uses relative imports to work with Vercel's bundler in a monorepo.
  */
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
@@ -9,12 +9,12 @@ let appPromise: Promise<any> | null = null;
 async function initApp() {
   console.log("[vercel] Starting app init...");
   
-  const { createDb } = await import("@paperclipai/db");
+  // Use relative imports so Vercel's bundler can trace them
+  const { createDb } = await import("../packages/db/src/index.js");
   console.log("[vercel] createDb imported");
   
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error("DATABASE_URL is required");
-  console.log("[vercel] DATABASE_URL present");
   
   const db = createDb(databaseUrl);
   console.log("[vercel] DB created");
@@ -46,7 +46,7 @@ function getApp() {
   if (!appPromise) {
     appPromise = initApp().catch(err => {
       console.error("[vercel] INIT ERROR:", err.message, err.stack);
-      appPromise = null; // Allow retry
+      appPromise = null;
       throw err;
     });
   }
