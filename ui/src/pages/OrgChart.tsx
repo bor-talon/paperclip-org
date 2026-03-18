@@ -533,8 +533,8 @@ export function OrgChart() {
   if (orgTree && !orgTree.length) return <EmptyState icon={Network} message="No organizational hierarchy defined." />;
 
   return (
-    <div className="flex h-[calc(100vh-4rem)]">
-      <div className="flex-1 relative border border-border rounded-lg overflow-hidden">
+    <div className="flex h-[calc(100dvh-4rem)]">
+      <div className="flex-1 relative bg-muted/20 border border-border rounded-lg overflow-hidden">
         <ReactFlow
           nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
           onNodesChange={onNodesChange} onNodeClick={onNodeClick}
