@@ -1067,15 +1067,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const message = templateMessage ? appendWakeText(templateMessage, wakeText) : wakeText;
   const paperclipPayload = buildStandardPaperclipPayload(ctx, wakePayload, paperclipEnv, payloadTemplate);
 
+  const configuredAgentId = nonEmpty(ctx.config.agentId);
+
+  // Prefix session key with agentId so OpenClaw routes to the correct agent's
+  // session store instead of the default (token-authenticated) agent.
+  const resolvedSessionKey = configuredAgentId
+    ? `agent:${configuredAgentId}:${sessionKey}`
+    : sessionKey;
+
   const agentParams: Record<string, unknown> = {
     ...payloadTemplate,
     message,
-    sessionKey,
+    sessionKey: resolvedSessionKey,
     idempotencyKey: ctx.runId,
   };
   delete agentParams.text;
 
-  const configuredAgentId = nonEmpty(ctx.config.agentId);
   if (configuredAgentId && !nonEmpty(agentParams.agentId)) {
     agentParams.agentId = configuredAgentId;
   }

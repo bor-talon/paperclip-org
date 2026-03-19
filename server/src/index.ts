@@ -491,7 +491,7 @@ export async function startServer(): Promise<StartedServer> {
     }
   }
   
-  const listenPort = await detectPort(config.port);
+  const listenPort = await detectPort({ port: config.port, hostname: config.host !== "0.0.0.0" ? config.host : undefined } as any);
   const uiMode = config.uiDevMiddleware ? "vite-dev" : config.serveUi ? "static" : "none";
   const storageService = createStorageServiceFromConfig(config);
   const app = await createApp(db as any, {
